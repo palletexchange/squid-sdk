@@ -3,15 +3,18 @@ import {addErrorContext, wait} from '@subsquid/util-internal'
 import {getRequestAt, mapRangeRequestList, RangeRequestList} from '@subsquid/util-internal-range'
 import {PartialBlock} from '../data/partial'
 import {DataRequest} from '../data/request'
-import type {RpcSettings} from '../source'
+import type {RpcSettings, WsRpcSettings} from '../source'
 import {mapBlock} from './mapping'
+import {WsRpc} from '@subsquid/solana-rpc/lib/ws-rpc'
 
 
 export class RpcDataSource {
     private rpc: Rpc
+    private wsRpc?: WsRpc
 
-    constructor(private options: RpcSettings) {
-        this.rpc = new Rpc(options.client)
+    constructor(private rpcOptions: RpcSettings, private wsRpcOptions?: WsRpcSettings) {
+        this.rpc = new Rpc(rpcOptions.client)
+        this.wsRpc = wsRpcOptions ? new WsRpc(wsRpcOptions.client) : undefined
     }
 
     getFinalizedHeight(): Promise<number> {
@@ -50,10 +53,13 @@ export class RpcDataSource {
             requests: toRpcRequests(requests),
             stopOnHead,
             rpc: this.rpc,
+            wsRpc: this.wsRpc,
             headPollInterval: 5_000,
-            strideSize: this.options.strideSize ?? 5,
-            strideConcurrency: this.options.strideConcurrency ?? 5,
-            concurrentFetchThreshold: this.options.concurrentFetchThreshold ?? 50
+            strideSize: this.rpcOptions.strideSize ?? 5,
+            strideConcurrency: this.rpcOptions.strideConcurrency ?? 5,
+            concurrentFetchThreshold: this.rpcOptions.concurrentFetchThreshold ?? 50,
+            newHeadTimeout: this.wsRpcOptions?.newHeadTimeout ?? 10_000,
+            subscriptionFetchThreshold: this.wsRpcOptions?.subscriptionFetchThreshold ?? 5,
         })
 
         for await (let batch of blockStream) {

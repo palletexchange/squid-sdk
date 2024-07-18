@@ -77,6 +77,22 @@ export interface RpcSettings {
 }
 
 
+export interface WsRpcSettings {
+    /**
+     * WebSocket RPC client
+     */
+    client: SolanaRpcClient
+    /**
+     * When websocket subscription is used to get new blocks,
+     * this setting specifies timeout in `ms` after which connection
+     * will be reset and subscription re-initiated if no new block where received.
+     */
+    newHeadTimeout?: number
+
+    subscriptionFetchThreshold?: number
+}
+
+
 interface BlockRange {
     range?: Range
 }
@@ -88,6 +104,7 @@ export class DataSourceBuilder<F extends FieldSelection = {}> {
     private blockRange?: Range
     private archive?: GatewaySettings
     private rpc?: RpcSettings
+    private wsRpc?: WsRpcSettings
 
     /**
      * Set Subsquid Network Gateway endpoint (ex Archive).
@@ -112,6 +129,14 @@ export class DataSourceBuilder<F extends FieldSelection = {}> {
      */
     setRpc(settings?: RpcSettings): this {
         this.rpc = settings
+        return this
+    }
+
+    /**
+     * Set up WebSocket RPC data ingestion
+     */
+    setWsRpc(settings?: WsRpcSettings): this {
+        this.wsRpc = settings
         return this
     }
 
@@ -243,7 +268,8 @@ export class DataSourceBuilder<F extends FieldSelection = {}> {
         return new SolanaDataSource(
             this.getRequests(),
             this.archive,
-            this.rpc
+            this.rpc,
+            this.wsRpc,
         ) as DataSource<Block<F>>
     }
 }
@@ -268,11 +294,12 @@ class SolanaDataSource implements DataSource<PartialBlock> {
     constructor(
         private requests: RangeRequestList<DataRequest>,
         private archiveSettings?: GatewaySettings,
-        rpcSettings?: RpcSettings
+        rpcSettings?: RpcSettings,
+        wsRpcSettings?: WsRpcSettings
     ) {
         assert(this.archiveSettings || rpcSettings, 'either archive or RPC should be provided')
         if (rpcSettings) {
-            this.rpc = new RpcDataSource(rpcSettings)
+            this.rpc = new RpcDataSource(rpcSettings, wsRpcSettings)
         }
         this.ranges = this.requests.map(req => req.range)
     }

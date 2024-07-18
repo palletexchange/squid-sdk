@@ -7,16 +7,21 @@ import {Rpc} from '../rpc'
 import {AsyncJobTracker, AsyncProbe, isConsistentChain, toBlock} from '../util'
 import {PollStream} from './poll'
 import {findSlot, HeightAndSlot} from './slot-search'
+import {SubscriptionStream} from './subscription'
+import {WsRpc} from '../ws-rpc'
 
 
 export interface IngestFinalizedBlocksOptions {
     requests: RangeRequest<DataRequest>[]
     stopOnHead?: boolean
     rpc: Rpc
+    wsRpc?: WsRpc
     headPollInterval: number
     strideSize: number
     strideConcurrency: number
     concurrentFetchThreshold: number
+    newHeadTimeout?: number
+    subscriptionFetchThreshold?: number
 }
 
 
@@ -72,12 +77,14 @@ interface FetchJob {
 
 class ColdIngest {
     private rpc: Rpc
+    private wsRpc?: WsRpc
     private head: Throttler<number>
     private bottom: HeightAndSlot
     private top?: HeightAndSlot
 
     constructor(private options: IngestFinalizedBlocksOptions) {
         this.rpc = options.rpc
+        this.wsRpc = options.wsRpc
         this.head = new Throttler(
             () => this.rpc.getTopSlot('finalized'),
             this.options.headPollInterval
@@ -129,12 +136,17 @@ class ColdIngest {
 
             while (beg <= end) {
                 let headSlot = await this.head.get()
+
                 if (this.options.stopOnHead && headSlot < begSlot) return
-                if (headSlot - this.options.concurrentFetchThreshold - begSlot <= this.options.strideSize) {
-                    yield* this.serialFetch(req.request, begSlot, end)
+
+                if (this.wsRpc != null && headSlot - begSlot <= (this.options.subscriptionFetchThreshold || 0)) {
+                    yield * this.subscriptionFetch(req.request, begSlot, end)
+                } else if (headSlot - this.options.concurrentFetchThreshold - begSlot <= this.options.strideSize) {
+                    let stopOnHead = this.options.stopOnHead || !!this.wsRpc
+                    yield * this.serialFetch(req.request, begSlot, end, stopOnHead)
                 } else {
                     let endSlot = Math.min(headSlot - this.options.concurrentFetchThreshold, begSlot + end - beg)
-                    yield* this.concurrentFetch(req.request, begSlot, endSlot)
+                    yield * this.concurrentFetch(req.request, begSlot, endSlot)
                 }
                 beg = this.bottom.height + 1
                 begSlot = this.bottom.slot + 1
@@ -142,7 +154,32 @@ class ColdIngest {
         }
     }
 
-    private async *serialFetch(req: DataRequest, fromSlot: number, endBlock: number): AsyncIterable<FetchJob> {
+    private async *subscriptionFetch(req: DataRequest, fromSlot: number, endBlock: number): AsyncIterable<FetchJob> {
+        assert(this.wsRpc != null)
+
+        let stream = new SubscriptionStream(
+            this.wsRpc,
+            this.options.newHeadTimeout || Infinity,
+            'finalized',
+            req,
+            fromSlot
+        )
+
+        for await (let blocks of stream.getBlocks()) {
+            if (fromSlot < blocks[0].slot) {
+                yield *this.serialFetch(req, fromSlot, blocks[0].height)
+            }
+
+            while (last(blocks).height > endBlock) {
+                blocks.pop()
+            }
+            this.setBottom(last(blocks))
+            yield {promise: Promise.resolve(blocks)}
+            if (this.bottom.height == endBlock) return
+        }
+    }
+
+    private async *serialFetch(req: DataRequest, fromSlot: number, endBlock: number, stopOnHead?: boolean): AsyncIterable<FetchJob> {
         let headProbe = new AsyncProbe(await this.head.get(), () => this.head.call())
 
         let stream = new PollStream(
@@ -162,6 +199,7 @@ class ColdIngest {
         ) {
             let blocks = await stream.next()
             if (blocks.length == 0) {
+                if (stopOnHead) return
                 let pause = retrySchedule[Math.max(retryAttempts, retrySchedule.length - 1)]
                 await wait(pause)
                 retryAttempts += 1
