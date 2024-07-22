@@ -1,15 +1,18 @@
 import {SubscriptionHandle} from '@subsquid/rpc-client'
 import {Block} from '@subsquid/solana-rpc-data'
-import {addErrorContext, assertNotNull, AsyncQueue, ensureError, last, maybeLast} from '@subsquid/util-internal'
+import {addErrorContext, assertNotNull, AsyncQueue, createFuture, ensureError, Future, last, maybeLast} from '@subsquid/util-internal'
 import assert from 'assert'
 import {Commitment, DataRequest} from '../base'
 import {BlockNotification, WsRpc} from '../ws-rpc'
+import {addTimeout, TimeoutError} from '@subsquid/util-timeout'
 
 export class SubscriptionStream {
     private blocks: Block[] = []
     private notify = new AsyncQueue<null | Error>(1)
     private handle?: SubscriptionHandle
+    private getFirstSlotFuture?: Future<number>
     private pos: number
+    private lastHeight?: number
 
     constructor(
         private rpc: WsRpc,
@@ -25,17 +28,46 @@ export class SubscriptionStream {
         this.pos = fromSlot - 1
     }
 
-    getHeadSlot(): number {
+    async getFirstSlot(): Promise<number> {
         if (this.blocks.length > 0) {
-            let head = last(this.blocks)
-            return head.slot
+            return this.blocks[0].slot
         } else {
-            return this.pos
+            this.subscribe()
+
+            this.getFirstSlotFuture = this.getFirstSlotFuture || createFuture()
+            return this.getFirstSlotFuture.promise()
         }
     }
 
     async *getBlocks(): AsyncIterable<Block[]> {
-        assert(this.handle == null, 'subscription is already in use')
+        this.subscribe()
+        
+        while (true) {
+            let err = await addTimeout(this.notify.take(), this.newHeadTimeout).catch(ensureError)
+
+            if (err instanceof TimeoutError) {
+                this.rpc.client.reset()
+            } else if (err instanceof Error) {
+                throw err
+            } else {
+                if (this.blocks.length > 0) {
+                    let blocks = this.blocks
+                    if (blocks.length > 0) {
+                        this.pos = last(blocks).slot
+                    }
+                    this.blocks = []
+        
+                    yield blocks
+                }
+                
+                if (err === undefined) return
+            }
+        }
+    }
+
+    private subscribe() {
+        if (this.handle != null) return
+
         this.handle = this.rpc.blockSubscribe({
             commitment: this.commitment,
             rewards: this.req.rewards,
@@ -50,17 +82,6 @@ export class SubscriptionStream {
             },
             onError: (err) => this.error(err),
         })
-        for await (let err of this.notify.iterate()) {
-            if (err instanceof Error) throw err
-
-            let blocks = this.blocks
-            if (blocks.length > 0) {
-                this.pos = last(blocks).slot
-            }
-            this.blocks = []
-
-            yield blocks
-        }
     }
 
     private error(err: unknown): void {
@@ -71,7 +92,7 @@ export class SubscriptionStream {
     private onBlockNotification(msg: BlockNotification): void {
         let {slot, err, block} = msg.value
 
-        if (slot < this.pos) return
+        if (slot <= this.pos) return
 
         if (err) {
             throw addErrorContext(new Error(`Got a block notification error at slot ${slot}`), {
@@ -98,6 +119,10 @@ export class SubscriptionStream {
     }
 
     private push(block: Block): void {
+        if (this.lastHeight != null && this.lastHeight + 1 < block.height) {
+            return this.notify.close()
+        }
+
         while (this.blocks.length && last(this.blocks).height >= block.height) {
             this.blocks.pop()
         }
@@ -107,10 +132,16 @@ export class SubscriptionStream {
             }
         }
 
-        this.blocks.push(block)
-        this.notify.forcePut(null)
-
-        if (this.blocks.length >= 50) {
+        if (this.blocks.length < 50) {
+            this.blocks.push(block)
+            this.notify.forcePut(null)
+    
+            this.getFirstSlotFuture?.resolve(block.slot)
+            this.getFirstSlotFuture = undefined
+    
+            this.lastHeight = block.height
+        } else {
+            this.notify.close()
         }
     }
 }

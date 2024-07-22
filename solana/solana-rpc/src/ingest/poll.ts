@@ -1,5 +1,5 @@
 import {Base58Bytes, Block} from '@subsquid/solana-rpc-data'
-import {last} from '@subsquid/util-internal'
+import {last, wait} from '@subsquid/util-internal'
 import assert from 'assert'
 import {Commitment, DataRequest} from '../base'
 import {Rpc} from '../rpc'
@@ -35,6 +35,23 @@ export class PollStream {
 
     isOnHead(): boolean {
         return this._isOnHead
+    }
+
+    async *getBlocks(): AsyncIterable<Block[]> {
+        let retrySchedule = [0, 100, 200, 400, 1000, 2000]
+        let retryAttempts = 0
+
+        while (true) {
+            let batch = await this.next()
+            if (batch.length == 0) {
+                let pause = retrySchedule[Math.max(retryAttempts, retrySchedule.length - 1)]
+                await wait(pause)
+                retryAttempts += 1
+            } else {
+                retryAttempts = 0
+                yield batch
+            }
+        }
     }
 
     async next(): Promise<Block[]> {

@@ -21,7 +21,13 @@ const dataSource = new DataSourceBuilder()
             url: process.env.SOLANA_NODE,
             // rateLimit: 100 // requests per sec
         }),
-        strideConcurrency: 10
+        strideConcurrency: 40,
+        strideSize: 20,
+    })
+    .setWsRpc(process.env.SOLANA_NODE_WS == null ? undefined : {
+        client: new SolanaRpcClient({
+            url: process.env.SOLANA_NODE_WS,
+        }),
     })
     // Currently only blocks from 240_000_000 and above are stored in Subsquid Network.
     // When we specify it, we must also limit the range of requested blocks.
@@ -30,7 +36,7 @@ const dataSource = new DataSourceBuilder()
     //
     // NOTE, that block ranges are specified in heights, not in slots !!!
     //
-    .setBlockRange({from: 240_000_000})
+    .setBlockRange({from: 258_078_797})
     //
     // Block data returned by the data source has the following structure:
     //

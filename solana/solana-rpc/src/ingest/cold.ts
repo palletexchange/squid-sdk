@@ -11,17 +11,22 @@ import {SubscriptionStream} from './subscription'
 import {WsRpc} from '../ws-rpc'
 
 
+export interface WsRpcOptions {
+    rpc: WsRpc
+    newHeadTimeout: number
+    subscriptionFetchThreshold: number
+}
+
+
 export interface IngestFinalizedBlocksOptions {
     requests: RangeRequest<DataRequest>[]
     stopOnHead?: boolean
     rpc: Rpc
-    wsRpc?: WsRpc
     headPollInterval: number
     strideSize: number
     strideConcurrency: number
     concurrentFetchThreshold: number
-    newHeadTimeout?: number
-    subscriptionFetchThreshold?: number
+    wsRpcOptions?: WsRpcOptions
 }
 
 
@@ -50,7 +55,7 @@ export async function* ingestFinalizedBlocks(options: IngestFinalizedBlocksOptio
 
         for (let block of batch) {
             if (prev && !isConsistentChain(prev, block)) {
-                throw new ChainConsistencyError(batch[0])
+                throw new ChainConsistencyError(block)
             }
             prev = block
         }
@@ -77,14 +82,14 @@ interface FetchJob {
 
 class ColdIngest {
     private rpc: Rpc
-    private wsRpc?: WsRpc
+    private wsRpcOptions?: WsRpcOptions
     private head: Throttler<number>
     private bottom: HeightAndSlot
     private top?: HeightAndSlot
 
     constructor(private options: IngestFinalizedBlocksOptions) {
         this.rpc = options.rpc
-        this.wsRpc = options.wsRpc
+        this.wsRpcOptions = options.wsRpcOptions
         this.head = new Throttler(
             () => this.rpc.getTopSlot('finalized'),
             this.options.headPollInterval
@@ -136,17 +141,13 @@ class ColdIngest {
 
             while (beg <= end) {
                 let headSlot = await this.head.get()
-
                 if (this.options.stopOnHead && headSlot < begSlot) return
 
-                if (this.wsRpc != null && headSlot - begSlot <= (this.options.subscriptionFetchThreshold || 0)) {
-                    yield * this.subscriptionFetch(req.request, begSlot, end)
-                } else if (headSlot - this.options.concurrentFetchThreshold - begSlot <= this.options.strideSize) {
-                    let stopOnHead = this.options.stopOnHead || !!this.wsRpc
-                    yield * this.serialFetch(req.request, begSlot, end, stopOnHead)
+                if (headSlot - this.options.concurrentFetchThreshold - begSlot <= this.options.strideSize) {
+                    yield* this.serialFetch(req.request, begSlot, end)
                 } else {
                     let endSlot = Math.min(headSlot - this.options.concurrentFetchThreshold, begSlot + end - beg)
-                    yield * this.concurrentFetch(req.request, begSlot, endSlot)
+                    yield* this.concurrentFetch(req.request, begSlot, endSlot)
                 }
                 beg = this.bottom.height + 1
                 begSlot = this.bottom.slot + 1
@@ -154,35 +155,10 @@ class ColdIngest {
         }
     }
 
-    private async *subscriptionFetch(req: DataRequest, fromSlot: number, endBlock: number): AsyncIterable<FetchJob> {
-        assert(this.wsRpc != null)
-
-        let stream = new SubscriptionStream(
-            this.wsRpc,
-            this.options.newHeadTimeout || Infinity,
-            'finalized',
-            req,
-            fromSlot
-        )
-
-        for await (let blocks of stream.getBlocks()) {
-            if (fromSlot < blocks[0].slot) {
-                yield *this.serialFetch(req, fromSlot, blocks[0].height)
-            }
-
-            while (last(blocks).height > endBlock) {
-                blocks.pop()
-            }
-            this.setBottom(last(blocks))
-            yield {promise: Promise.resolve(blocks)}
-            if (this.bottom.height == endBlock) return
-        }
-    }
-
-    private async *serialFetch(req: DataRequest, fromSlot: number, endBlock: number, stopOnHead?: boolean): AsyncIterable<FetchJob> {
+    private async *serialFetch(req: DataRequest, fromSlot: number, endBlock: number): AsyncIterable<FetchJob> {
         let headProbe = new AsyncProbe(await this.head.get(), () => this.head.call())
 
-        let stream = new PollStream(
+        let pollStream = new PollStream(
             this.rpc,
             this.options.strideSize,
             'finalized',
@@ -190,28 +166,42 @@ class ColdIngest {
             fromSlot
         )
 
-        let retrySchedule = [0, 100, 200, 400, 1000, 2000]
-        let retryAttempts = 0
+        let subscriptionStream = this.wsRpcOptions ? new SubscriptionStream(
+            this.wsRpcOptions.rpc,
+            this.wsRpcOptions.newHeadTimeout,
+            'finalized',
+            req,
+            pollStream.getHeadSlot()
+        ) : undefined
 
-        while (
-            stream.isOnHead() ||
-            headProbe.get() - stream.getHeadSlot() - this.options.concurrentFetchThreshold < 2 * this.options.strideSize
-        ) {
-            let blocks = await stream.next()
-            if (blocks.length == 0) {
-                if (stopOnHead) return
-                let pause = retrySchedule[Math.max(retryAttempts, retrySchedule.length - 1)]
-                await wait(pause)
-                retryAttempts += 1
-            } else {
-                retryAttempts = 0
-                while (last(blocks).height > endBlock) {
-                    blocks.pop()
-                }
-                this.setBottom(last(blocks))
-                yield {promise: Promise.resolve(blocks)}
-                if (this.bottom.height == endBlock) return
+        const handleBatch = (batch: Block[]) => {
+            while (batch.length > 0 && last(batch).height > endBlock) {
+                batch.pop()
             }
+            while (batch.length > 0 && batch[0].height <= this.bottom.height) {
+                batch.shift()
+            }
+            if (batch.length > 0) this.setBottom(last(batch))
+            return {promise: Promise.resolve(batch)}
+        }
+
+        for await (let batch of pollStream.getBlocks()) {
+            yield handleBatch(batch)
+            if (this.bottom.height == endBlock) return
+
+            let head = headProbe.get()
+            let streamHead = pollStream.getHeadSlot()
+
+            if (head <= streamHead && subscriptionStream != null && streamHead >= await subscriptionStream.getFirstSlot()) break
+
+            if (!pollStream.isOnHead() && head - streamHead - this.options.concurrentFetchThreshold >= 2 * this.options.strideSize) return
+        }
+
+        assert(subscriptionStream != null)
+
+        for await (let batch of subscriptionStream.getBlocks()) {
+            yield handleBatch(batch)
+            if (this.bottom.height == endBlock) return
         }
     }
 

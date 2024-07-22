@@ -12,7 +12,7 @@ export interface BlockSubscribeOptions extends GetBlockOptions {
 }
 
 export class WsRpc {
-    constructor(private client: RpcClient) {
+    constructor(readonly client: RpcClient) {
         assert(this.client.supportsNotifications())
     }
 

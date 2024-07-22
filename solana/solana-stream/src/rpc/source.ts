@@ -53,13 +53,15 @@ export class RpcDataSource {
             requests: toRpcRequests(requests),
             stopOnHead,
             rpc: this.rpc,
-            wsRpc: this.wsRpc,
             headPollInterval: 5_000,
             strideSize: this.rpcOptions.strideSize ?? 5,
             strideConcurrency: this.rpcOptions.strideConcurrency ?? 5,
             concurrentFetchThreshold: this.rpcOptions.concurrentFetchThreshold ?? 50,
-            newHeadTimeout: this.wsRpcOptions?.newHeadTimeout ?? 10_000,
-            subscriptionFetchThreshold: this.wsRpcOptions?.subscriptionFetchThreshold ?? 5,
+            wsRpcOptions: this.wsRpc ? {
+                rpc: this.wsRpc,
+                subscriptionFetchThreshold: this.wsRpcOptions?.subscriptionFetchThreshold ?? 5,
+                newHeadTimeout: this.wsRpcOptions?.newHeadTimeout ?? 10_000
+            } : undefined
         })
 
         for await (let batch of blockStream) {
