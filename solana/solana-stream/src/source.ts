@@ -88,8 +88,6 @@ export interface WsRpcSettings {
      * will be reset and subscription re-initiated if no new block where received.
      */
     newHeadTimeout?: number
-
-    subscriptionFetchThreshold?: number
 }
 
 

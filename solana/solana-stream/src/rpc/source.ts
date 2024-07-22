@@ -59,7 +59,6 @@ export class RpcDataSource {
             concurrentFetchThreshold: this.rpcOptions.concurrentFetchThreshold ?? 50,
             wsRpcOptions: this.wsRpc ? {
                 rpc: this.wsRpc,
-                subscriptionFetchThreshold: this.wsRpcOptions?.subscriptionFetchThreshold ?? 5,
                 newHeadTimeout: this.wsRpcOptions?.newHeadTimeout ?? 10_000
             } : undefined
         })

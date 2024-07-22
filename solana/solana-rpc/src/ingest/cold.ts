@@ -14,7 +14,6 @@ import {WsRpc} from '../ws-rpc'
 export interface WsRpcOptions {
     rpc: WsRpc
     newHeadTimeout: number
-    subscriptionFetchThreshold: number
 }
 
 
