@@ -45,6 +45,7 @@ export class Typegen {
     }
 
     private sts = new Map<Runtime, Sts>()
+    private palletModules = new Map<string, Set<string>>
 
     public readonly dir: OutDir
 
@@ -58,6 +59,7 @@ export class Typegen {
         this.generateEnums('calls')
         this.generateStorage()
         this.generateConsts()
+        this.generatePalletModules()
 
         let index = this.dir.file('index.ts')
 
@@ -100,44 +102,41 @@ export class Typegen {
             let file = new ItemFile(this, pallet, fix)
             let out = file.out
 
+            this.getPalletModule(pallet).add(file.name)
+
             for (let [name, versions] of groupBy(palletItems, it => it.def.name)) {
                 out.line()
-                out.block(`export const ${toJsName(name)} = `, () => {
-                    out.line(`name: '${pallet}.${name}',`)
+                out.line(`export const ${toJsName(name)} = ${fix.toLowerCase()}_('${pallet}.${name}', {`)
+                out.indentation(() => {
                     for (let it of versions) {
                         let useSts = file.useSts(it.runtime)
 
                         out.blockComment(it.def.docs)
-                        out.line(`${this.getVersionName(it.runtime)}: new ${fix}Type(`)
-                        out.indentation(() => {
-                            out.line(`'${pallet}.${name}',`)
-                            if (it.def.fields.length == 0 || it.def.fields[0].name == null) {
-                                if (it.def.fields.length == 1) {
-                                    out.line(
-                                        useSts(it.def.fields[0].type)
-                                    )
-                                } else {
-                                    let list = it.def.fields.map(f => useSts(f.type)).join(', ')
-                                    if (list) {
-                                        out.line(`sts.tuple([${list}])`)
-                                    } else {
-                                        out.line('sts.unit()')
-                                    }
-                                }
+                        let versionName = this.getVersionName(it.runtime)
+                        if (it.def.fields.length == 0 || it.def.fields[0].name == null) {
+                            if (it.def.fields.length == 1) {
+                                out.line(`${versionName}: ${useSts(it.def.fields[0].type)},` )
                             } else {
-                                out.line('sts.struct({')
-                                out.indentation(() => {
-                                    for (let f of it.def.fields) {
-                                        out.blockComment(f.docs)
-                                        out.line(`${f.name}: ${useSts(f.type)},`)
-                                    }
-                                })
-                                out.line('})')
+                                let list = it.def.fields.map(f => useSts(f.type)).join(', ')
+                                if (list) {
+                                    out.line(`${versionName}: sts.tuple([${list}]),`)
+                                } else {
+                                    out.line(`${versionName}: sts.unit(),`)
+                                }
                             }
-                        })
-                        out.line('),')
+                        } else {
+                            out.line(`${versionName}: sts.struct({`)
+                            out.indentation(() => {
+                                for (let f of it.def.fields) {
+                                    out.blockComment(f.docs)
+                                    out.line(`${f.name}: ${useSts(f.type)},`)
+                                }
+                            })
+                            out.line('}),')
+                        }
                     }
                 })
+                out.line('})')
             }
 
             file.write()
@@ -151,21 +150,20 @@ export class Typegen {
             let file = new ItemFile(this, pallet, 'Constant')
             let out = file.out
 
+            this.getPalletModule(pallet).add(file.name)
+
             for (let [name, versions] of groupBy(palletItems, it => splitQualifiedName(it.name)[1])) {
                 out.line()
-                out.block(`export const ${toJsName(name)} = `, () => {
+                out.line(`export const ${toJsName(name)} = constant_('${pallet}.${name}', {`)
+                out.indentation(() => {
                     for (let it of versions) {
                         let useSts = file.useSts(it.runtime)
 
                         out.blockComment(it.def.docs)
-                        out.line(`${this.getVersionName(it.runtime)}: new ConstantType(`)
-                        out.indentation(() => {
-                            out.line(`'${it.name}',`)
-                            out.line(useSts(it.def.type))
-                        })
-                        out.line('),')
+                        out.line(`${this.getVersionName(it.runtime)}: ${useSts(it.def.type)},`)
                     }
                 })
+                out.line(`})`)
             }
 
             file.write()
@@ -179,11 +177,16 @@ export class Typegen {
             let file = new ItemFile(this, pallet, 'Storage')
             let out = file.out
 
-            for (let [jsName, versions] of groupBy(palletItems, it => toJsName(splitQualifiedName(it.name)[1]))) {
+            this.getPalletModule(pallet).add(file.name)
+
+            for (let [name, versions] of groupBy(palletItems, it => toJsName(splitQualifiedName(it.name)[1]))) {
+                let jsName = toJsName(name)
+
                 let ifs: (() => void)[] = []
 
                 out.line()
-                out.block(`export const ${jsName} = `, () => {
+                out.line(`export const ${jsName} = storage_('${pallet}.${name}', {`)
+                out.indentation(() => {
                     for (let it of versions) {
                         let ifName = upperCaseFirst(
                             toCamelCase(`${jsName}_${this.getVersionName(it.runtime)}`)
@@ -197,73 +200,29 @@ export class Typegen {
 
                         out.blockComment(it.def.docs)
                         out.line(
-                            `${this.getVersionName(it.runtime)}: new StorageType(` +
-                            `'${it.name}', ` +
-                            `'${it.def.modifier}', ` +
-                            `[${keyListExp}], ` +
-                            `${valueExp}` +
-                            `) as ${ifName},`
+                            `${this.getVersionName(it.runtime)}: {` +
+                            `key: [${keyListExp}], ` +
+                            `value: ${valueExp}, ` +
+                            `modifier: '${it.def.modifier}', ` +
+                            `isKeyDecodable: ${isStorageKeyDecodable(it.def)}` +
+                            `} as const,`
                         )
 
                         ifs.push(() => {
+                            let value = useIfs(it.def.value)
+                            
+                            let keys = it.def.keys.map(ti => useIfs(ti))
+                            let args = keys.length == 1
+                                ? [`key: ${keys[0]}`]
+                                : keys.map((exp, idx) => `key${idx+1}: ${exp}`)
+
                             out.line()
                             out.blockComment(it.def.docs)
-                            out.block(`export interface ${ifName} `, () => {
-                                out.line(`is(block: RuntimeCtx): boolean`)
-
-                                let value = useIfs(it.def.value)
-                                let keys = it.def.keys.map(ti => useIfs(ti))
-
-                                let args = keys.length == 1
-                                    ? [`key: ${keys[0]}`]
-                                    : keys.map((exp, idx) => `key${idx+1}: ${exp}`)
-
-                                let fullKey = keys.length == 1 ? keys[0] : `[${keys.join(', ')}]`
-
-                                let ret = it.def.modifier == 'Required' ? value : `(${value} | undefined)`
-
-                                let kv = `[k: ${fullKey}, v: ${ret}]`
-
-                                function* enumeratePartialApps(leading?: string): Iterable<string> {
-                                    let list: string[] = []
-                                    if (leading) {
-                                        list.push(leading)
-                                    }
-                                    list.push('block: Block')
-                                    yield list.join(', ')
-                                    for (let arg of args) {
-                                        list.push(arg)
-                                        yield list.join(', ')
-                                    }
-                                }
-
-                                if (it.def.modifier == 'Default') {
-                                    out.line(`getDefault(block: Block): ${value}`)
-                                }
-
-                                out.line(`get(${['block: Block'].concat(args).join(', ')}): Promise<${ret}>`)
-
-                                if (args.length > 0) {
-                                    out.line(`getMany(block: Block, keys: ${fullKey}[]): Promise<${ret}[]>`)
-                                    if (isStorageKeyDecodable(it.def)) {
-                                        for (let args of enumeratePartialApps()) {
-                                            out.line(`getKeys(${args}): Promise<${fullKey}[]>`)
-                                        }
-                                        for (let args of enumeratePartialApps('pageSize: number')) {
-                                            out.line(`getKeysPaged(${args}): AsyncIterable<${fullKey}[]>`)
-                                        }
-                                        for (let args of enumeratePartialApps()) {
-                                            out.line(`getPairs(${args}): Promise<${kv}[]>`)
-                                        }
-                                        for (let args of enumeratePartialApps('pageSize: number')) {
-                                            out.line(`getPairsPaged(${args}): AsyncIterable<${kv}[]>`)
-                                        }
-                                    }
-                                }
-                            })
+                            out.line(`export type ${ifName} = GetStorageType<[${args.join(`, `)}], ${value}, '${it.def.modifier}', ${isStorageKeyDecodable(it.def)}>`)
                         })
                     }
                 })
+                out.line('})')
 
                 for (let i of ifs) {
                     i()
@@ -271,6 +230,19 @@ export class Typegen {
             }
 
             file.write()
+        }
+    }
+
+    private generatePalletModules() {
+        for (let [pallet, modules] of this.palletModules) {
+            let out = this.dir.child(getPalletDir(pallet)).file('index.ts')
+
+            for (let module of modules) {
+                let moduleName = module.slice(0, module.length - 3) // remove '.ts'
+                out.line(`export * as ${moduleName} from './${moduleName}'`)
+            }
+
+            out.write()
         }
     }
 
@@ -422,23 +394,39 @@ export class Typegen {
         this.sts.set(runtime, sts)
         return sts
     }
+
+    getPalletModule(pallet: string) {
+        let module = this.palletModules.get(pallet)
+        if (module == null) {
+            module = new Set()
+            this.palletModules.set(pallet, module)
+        }
+        return module
+    }
 }
 
 
 class ItemFile {
     private imported = new Set<Runtime>()
-    public readonly out: FileOutput
+    readonly out: FileOutput
+    readonly name: string
 
     constructor(
         private typegen: Typegen,
         pallet: string,
         type: 'Event' | 'Call' | 'Constant' | 'Storage'
     ) {
+        this.name = type == 'Storage' ? 'storage.ts' : type.toLowerCase() + 's.ts'
         this.out = this.typegen.dir
             .child(getPalletDir(pallet))
-            .file(type == 'Storage' ? 'storage.ts' : type.toLowerCase() + 's.ts')
+            .file(this.name)
 
-        this.out.line(`import {sts, Block, Bytes, Option, Result, ${type}Type, RuntimeCtx} from '../support'`)
+        let imports = ['sts', 'Block', 'Bytes', 'Option', 'Result', `${type}Type`, `${type.toLowerCase()} as ${type.toLowerCase()}_`, 'RuntimeCtx' ]
+        if (type === 'Storage') {
+            imports.push('GetStorageType')
+        }
+
+        this.out.line(`import {${imports.join(', ')}} from '../support'`)
 
         this.out.lazy(() => {
             Array.from(this.imported)

@@ -1,10 +1,9 @@
 import {BigDecimal} from '@subsquid/big-decimal'
 import * as ss58 from '@subsquid/ss58'
 import {SubstrateBatchProcessor} from '@subsquid/substrate-processor'
-import {Bytes} from '@subsquid/substrate-runtime'
 import {TypeormDatabase} from '@subsquid/typeorm-store'
 import {Transfer} from './model'
-import {events} from './types'
+import * as balances from './types/balances'
 
 
 const processor = new SubstrateBatchProcessor()
@@ -17,7 +16,7 @@ const processor = new SubstrateBatchProcessor()
     })
     .setBlockRange({from: 19_666_100})
     .addEvent({
-        name: [events.balances.transfer.name]
+        name: [balances.events.transfer.name]
     })
 
 
@@ -26,16 +25,28 @@ processor.run(new TypeormDatabase(), async ctx => {
 
     for (let block of ctx.blocks) {
         for (let event of block.events) {
-            let rec: {from: Bytes, to: Bytes, amount: bigint}
-            if (events.balances.transfer.v1020.is(event)) {
-                let [from, to, amount, fee] = events.balances.transfer.v1020.decode(event)
-                rec = {from, to, amount}
-            } else if (events.balances.transfer.v1050.is(event)) {
-                let [from, to, amount] = events.balances.transfer.v1050.decode(event)
-                rec = {from, to, amount}
-            } else {
-                rec = events.balances.transfer.v9130.decode(event)
-            }
+            let rec = balances.events.transfer.at(block.header, function (e, v) {
+                switch (v) {
+                    case 'v1020':
+                    case 'v1050': {
+                        let [from, to, amount] = e.decode(event)
+                        return {from, to, amount}
+                    }
+                    case 'v9130': {
+                        return e.decode(event)
+                    }
+                }
+            })
+
+            /**
+             * Just a demo
+             */
+            // let data = await balances.storage.account.at(block.header, async (s, _) => {
+            //     let d = s.getDefault()
+            //     let [from, to] = await s.getMany([rec.from, rec.to])
+            //     return {from: from?.free ?? d.free, to: to?.free ?? d.free}
+            // })
+
             transfers.push(new Transfer({
                 id: event.id,
                 from: ss58.codec('kusama').encode(rec.from),
