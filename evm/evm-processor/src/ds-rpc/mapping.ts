@@ -35,125 +35,14 @@ import {Block as RpcBlock, DebugStateDiffResult, DebugStateMap, TraceDiff, Trace
 import {DebugFrame, getBlockValidator} from './schema'
 import {getTxHash} from './util'
 
+const UNORDERED_TRANSACTION_CHAINS = [1329]
 
 export function mapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
-    try {
-        return tryMapBlock(rpcBlock, req)
-    } catch(err: any) {
-        throw addErrorContext(err, {
-            blockHash: rpcBlock.hash,
-            blockHeight: rpcBlock.height
-        })
-    }
 }
 
 
 function tryMapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
-    let src = cast(getBlockValidator(req), rpcBlock)
-
-    let {number, hash, parentHash, transactions, ...headerProps} = src.block
-    if (headerProps.timestamp) {
-        headerProps.timestamp = headerProps.timestamp * 1000 // convert to ms
-    }
-
-    let header = new BlockHeader(number, hash, parentHash)
-    Object.assign(header, headerProps)
-
-    let block = new Block(header)
-
-    if (req.transactionList) {
-        for (let i = 0; i < transactions.length; i++) {
-            let stx = transactions[i]
-            let tx = new Transaction(header, i)
-            if (typeof stx == 'string') {
-                if (req.fields.transaction?.hash) {
-                    tx.hash = stx
-                }
-            } else {
-                let {transactionIndex, ...props} = stx
-                Object.assign(tx, props)
-                assert(transactionIndex === i)
-                if (tx.input != null) {
-                    tx.sighash = tx.input.slice(0, 10)
-                }
-            }
-            block.transactions.push(tx)
-        }
-    }
-
-    if (req.receipts) {
-        let receipts = assertNotNull(src.receipts)
-        for (let i = 0; i < receipts.length; i++) {
-            let {transactionIndex, transactionHash, logs, ...props} = receipts[i]
-            
-            let transaction = block.transactions[i]
-            assert(transactionHash === transaction.hash)
-            Object.assign(transaction, props)
-
-            if (req.logList) {
-                for (let log of assertNotNull(logs)) {
-                    block.logs.push(makeLog(header, log))
-                }
-            }
-        }
-    }
-
-    if (src.logs) {
-        assert(block.logs.length == 0)
-        for (let log of src.logs) {
-            block.logs.push(makeLog(header, log))
-        }
-    }
-
-    if (src.traceReplays) {
-        let txIndex = new Map(src.block.transactions.map((tx, idx) => {
-            return [getTxHash(tx), idx]
-        }))
-        for (let rep of src.traceReplays) {
-            let transactionIndex = assertNotNull(txIndex.get(rep.transactionHash))
-            if (rep.trace) {
-                for (let frame of rep.trace) {
-                    block.traces.push(
-                        makeTraceRecordFromReplayFrame(header, transactionIndex, frame)
-                    )
-                }
-            }
-            if (rep.stateDiff) {
-                for (let diff of mapReplayStateDiff(header, transactionIndex, rep.stateDiff)) {
-                    if (diff.kind != '=') {
-                        block.stateDiffs.push(diff)
-                    }
-                }
-            }
-        }
-    }
-
-    if (src.debugFrames) {
-        assert(block.traces.length == 0)
-        for (let i = 0; i < src.debugFrames.length; i++) {
-            let frame = src.debugFrames[i]
-            if (frame == null) continue
-            for (let trace of mapDebugFrame(header, i, frame, req.fields)) {
-                block.traces.push(trace)
-            }
-        }
-    }
-
-    if (src.debugStateDiffs) {
-        assert(block.stateDiffs.length == 0)
-        for (let i = 0; i < src.debugStateDiffs.length; i++) {
-            for (let diff of mapDebugStateDiff(header, i, src.debugStateDiffs[i])) {
-                block.stateDiffs.push(diff)
-            }
-        }
-    }
-
-    setUpRelations(block)
-    filterBlock(block, req.dataRequest)
-
-    return block
 }
-
 
 function makeLog(blockHeader: BlockHeader, src: GetPropsCast<ReturnType<typeof getLogProps>>): Log {
     let {logIndex, transactionIndex, ...props} = src
