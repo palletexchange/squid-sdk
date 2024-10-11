@@ -35,6 +35,7 @@ import {Block as RpcBlock, DebugStateDiffResult, DebugStateMap, TraceDiff, Trace
 import {DebugFrame, getBlockValidator} from './schema'
 import {getTxHash} from './util'
 
+const UNORDERED_TRANSACTION_CHAINS = [1329]
 
 export function mapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
     try {
@@ -64,7 +65,10 @@ function tryMapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
     if (req.transactionList) {
         for (let i = 0; i < transactions.length; i++) {
             let stx = transactions[i]
-            let tx = new Transaction(header, i)
+            let isUnorderedChain = typeof stx == 'string' ? false : (!!stx.chainId && !!stx.transactionIndex && UNORDERED_TRANSACTION_CHAINS.includes(stx.chainId))
+            let index =  typeof stx == 'string' ? i : (isUnorderedChain && !!stx.transactionIndex) ? stx.transactionIndex : i
+            let tx = new Transaction(header, index)
+
             if (typeof stx == 'string') {
                 if (req.fields.transaction?.hash) {
                     tx.hash = stx
@@ -72,7 +76,11 @@ function tryMapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
             } else {
                 let {transactionIndex, ...props} = stx
                 Object.assign(tx, props)
-                assert(transactionIndex === i)
+                if (isUnorderedChain) {
+                    assert(transactionIndex === tx.transactionIndex)
+                } else {
+                    assert(transactionIndex === i)
+                }
                 if (tx.input != null) {
                     tx.sighash = tx.input.slice(0, 10)
                 }
@@ -85,7 +93,7 @@ function tryMapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
         let receipts = assertNotNull(src.receipts)
         for (let i = 0; i < receipts.length; i++) {
             let {transactionIndex, transactionHash, logs, ...props} = receipts[i]
-            
+
             let transaction = block.transactions[i]
             assert(transactionHash === transaction.hash)
             Object.assign(transaction, props)
@@ -114,7 +122,7 @@ function tryMapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
             if (rep.trace) {
                 for (let frame of rep.trace) {
                     block.traces.push(
-                        makeTraceRecordFromReplayFrame(header, transactionIndex, frame)
+                      makeTraceRecordFromReplayFrame(header, transactionIndex, frame)
                     )
                 }
             }
