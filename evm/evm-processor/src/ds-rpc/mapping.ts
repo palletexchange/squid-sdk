@@ -35,7 +35,8 @@ import {Block as RpcBlock, DebugStateDiffResult, DebugStateMap, TraceDiff, Trace
 import {DebugFrame, getBlockValidator} from './schema'
 import {getTxHash} from './util'
 
-const UNORDERED_TRANSACTION_CHAINS = [1329]
+const UNORDERED_TRANSACTION_CHAINS = ['sei']
+const IS_UNORDERED_CHAIN = UNORDERED_TRANSACTION_CHAINS.includes((process.env.NETWORK_SETTING || '').split('_')[0])
 
 export function mapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
     try {
@@ -65,8 +66,7 @@ function tryMapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
     if (req.transactionList) {
         for (let i = 0; i < transactions.length; i++) {
             let stx = transactions[i]
-            let isUnorderedChain = typeof stx == 'string' ? false : (!!stx.chainId && !!stx.transactionIndex && UNORDERED_TRANSACTION_CHAINS.includes(stx.chainId))
-            let index =  typeof stx == 'string' ? i : (isUnorderedChain && !!stx.transactionIndex) ? stx.transactionIndex : i
+            let index =  typeof stx == 'string' ? i : (IS_UNORDERED_CHAIN && !!stx.transactionIndex) ? stx.transactionIndex : i
             let tx = new Transaction(header, index)
 
             if (typeof stx == 'string') {
@@ -76,7 +76,7 @@ function tryMapBlock(rpcBlock: RpcBlock, req: MappingRequest): Block {
             } else {
                 let {transactionIndex, ...props} = stx
                 Object.assign(tx, props)
-                if (isUnorderedChain) {
+                if (IS_UNORDERED_CHAIN) {
                     assert(transactionIndex === tx.transactionIndex)
                 } else {
                     assert(transactionIndex === i)
