@@ -15,6 +15,7 @@ export interface TypeormDatabaseOptions {
     isolationLevel?: IsolationLevel
     stateSchema?: string
     projectDir?: string
+    accessibleDatasource?: boolean
 }
 
 
@@ -23,6 +24,7 @@ export class TypeormDatabase {
     private isolationLevel: IsolationLevel
     private con?: DataSource
     private projectDir: string
+    private accessibleDatasource: boolean
 
     public readonly supportsHotBlocks: boolean
 
@@ -31,6 +33,14 @@ export class TypeormDatabase {
         this.isolationLevel = options?.isolationLevel || 'SERIALIZABLE'
         this.supportsHotBlocks = options?.supportHotBlocks !== false
         this.projectDir = options?.projectDir || process.cwd()
+        this.accessibleDatasource = options?.accessibleDatasource || false
+    }
+
+    getDataSource(): DataSource | undefined {
+        if (!this.accessibleDatasource) {
+            throw new Error('Datasource is inaccessible')
+        }
+        return this.con
     }
 
     async connect(): Promise<DatabaseState> {
